@@ -1,0 +1,3 @@
+auth_config.local.json
+*.log
+__pycache__/
