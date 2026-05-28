@@ -259,3 +259,129 @@ custom_response = client.custom_request(
 ---
 
 **注意**: 此應用程序僅用於合法用途，請遵守相關法律法規和服務條款。
+
+## Chatbox Mode
+
+The app includes a checkbox:
+
+```text
+[ ] 是否使用 CHATBOX
+```
+
+When disabled, the GUI sends the native BigModel trial payload:
+
+```json
+{
+  "model": "glm-5.1",
+  "prompt": [
+    {
+      "role": "user",
+      "content": "HI",
+      "fileContentList": []
+    }
+  ],
+  "modelId": 11989,
+  "stream": true
+}
+```
+
+When enabled, the GUI simulates Chatbox/OpenAI request format:
+
+```json
+{
+  "model": "glm-5-1",
+  "messages": [
+    {
+      "role": "user",
+      "content": "HI"
+    }
+  ]
+}
+```
+
+The proxy then works as an API adapter:
+
+```text
+OpenAI messages request -> BigModel prompt request
+BigModel SSE response -> OpenAI-compatible SSE response
+```
+
+This is required because Chatbox validates streamed `data:` objects. BigModel may return internal chunks such as:
+
+```text
+data: {"think":"1"}
+```
+
+Chatbox rejects that shape because it expects:
+
+```json
+{
+  "choices": [
+    {
+      "delta": {
+        "content": "..."
+      }
+    }
+  ]
+}
+```
+
+In Chatbox mode, the proxy filters non-display BigModel events and returns OpenAI-compatible chunks ending with:
+
+```text
+data: [DONE]
+```
+
+## Chatbox Debug SOP
+
+1. Start the app:
+
+```powershell
+python main.py
+```
+
+2. Confirm the proxy is running:
+
+```text
+http://localhost:8080/health
+```
+
+3. Fill or reload local credentials:
+
+```text
+Authorization Token
+Model ID
+Organization
+Project
+```
+
+4. Enable:
+
+```text
+[x] 是否使用 CHATBOX
+```
+
+5. Send default message:
+
+```text
+HI
+```
+
+6. Expected behavior:
+
+- The request body contains `messages`.
+- The proxy logs request conversion to BigModel `prompt`.
+- The response body contains OpenAI `choices`.
+- Chatbox should not show `Invalid input: expected array choices`.
+
+## Latest Checkpoint
+
+```text
+ae7416b Convert BigModel SSE to OpenAI stream
+```
+
+Validation command:
+
+```powershell
+python -m py_compile reverse_proxy_server.py proxy_gui.py main.py
+```

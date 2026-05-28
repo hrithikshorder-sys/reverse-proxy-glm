@@ -634,3 +634,119 @@ Expected:
 - Default message is `HI`.
 - Unchecked mode sends BigModel `prompt`.
 - Checked Chatbox mode sends `messages`, proxy logs conversion, then BigModel receives `prompt`.
+
+## 16. Chatbox Response Adapter Checkpoint
+
+Date: 2026-05-28
+
+### Problem
+
+After request-body conversion was added, Chatbox still failed with:
+
+```text
+Type validation failed: Value: {"think":"1"}.
+Invalid input: expected array at path ["choices"]
+```
+
+This means the request adapter was working, but the response was still BigModel-native SSE.
+
+BigModel may return SSE lines like:
+
+```text
+event:add
+data:{"think":"1"}
+```
+
+Chatbox expects OpenAI-compatible streaming chunks:
+
+```text
+data: {"choices":[{"delta":{"content":"..."}}]}
+```
+
+So the missing layer was:
+
+```text
+BigModel SSE response -> OpenAI-compatible SSE response
+```
+
+### Root Cause
+
+The previous proxy only translated the incoming request:
+
+```text
+OpenAI messages -> BigModel prompt
+```
+
+But it returned the upstream response unchanged:
+
+```text
+BigModel data:{"think":"1"} -> Chatbox
+```
+
+Chatbox validates each `data:` JSON object. If the object does not contain either `choices` or `error`, validation fails.
+
+### Design Decision
+
+Only Chatbox/OpenAI mode should receive translated response chunks.
+
+Rules:
+
+- If request JSON contains `messages`, enable OpenAI response mode.
+- Convert request body to BigModel `prompt`.
+- Send request to BigModel trial SSE endpoint.
+- Convert BigModel SSE response to OpenAI-compatible SSE before returning to Chatbox.
+- Ignore non-display BigModel events such as `think` and `webSearch`.
+- Extract visible text from common fields: `text`, `content`, `answer`, `output`.
+- Wrap visible text into `choices[0].delta.content`.
+- End the stream with `data: [DONE]`.
+
+### Output Format
+
+The adapter emits:
+
+```text
+data: {"id":"chatcmpl-bigmodel-proxy","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-bigmodel-proxy","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-bigmodel-proxy","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+### Verification
+
+Run:
+
+```powershell
+python -m py_compile reverse_proxy_server.py proxy_gui.py main.py
+```
+
+Local conversion test:
+
+```python
+from reverse_proxy_server import convert_bigmodel_sse_to_openai_sse
+
+sample = b'event:add\ndata:{"think":"1"}\n\nevent:add\ndata:{"content":"Hello"}\n\n'
+print(convert_bigmodel_sse_to_openai_sse(sample).decode("utf-8"))
+```
+
+Expected:
+
+- No raw `data:{"think":"1"}` is returned.
+- Every JSON `data:` line has `choices`.
+- Final line is `data: [DONE]`.
+
+### Current Status
+
+Implemented in:
+
+```text
+reverse_proxy_server.py
+```
+
+Git commit:
+
+```text
+ae7416b Convert BigModel SSE to OpenAI stream
+```
