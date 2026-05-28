@@ -25,37 +25,6 @@ def load_local_auth_config():
         return {}
 
 
-def extract_answer_text_from_sse(response_text):
-    answer_parts = []
-    for line in response_text.splitlines():
-        if not line.startswith("data:"):
-            continue
-
-        raw_data = line[len("data:"):].strip()
-        if not raw_data or raw_data == "[DONE]":
-            continue
-
-        try:
-            data = json.loads(raw_data)
-        except json.JSONDecodeError:
-            continue
-
-        if isinstance(data, list):
-            continue
-        if not isinstance(data, dict):
-            continue
-        if "think" in data:
-            continue
-
-        for key in ("text", "content", "answer", "output"):
-            value = data.get(key)
-            if isinstance(value, str):
-                answer_parts.append(value)
-                break
-
-    return "".join(answer_parts).strip()
-
-
 class ProxyGUI:
     def __init__(self, root):
         self.root = root
@@ -339,10 +308,24 @@ class ProxyGUI:
                 "prompt": [{"role": "user", "content": message, "fileContentList": []}],
                 "modelId": int(model_id) if model_id.isdigit() else model_id,
                 "stream": True,
-                "thinking": {"type": "disabled"},
+                "thinking": {"type": "enabled"},
                 "max_tokens": 65536,
                 "temperature": 1,
                 "top_p": 0.95,
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "web_search": {
+                            "search_engine": "search_std",
+                            "search_recency_filter": "noLimit",
+                            "count": 10,
+                            "search_intent": False,
+                            "search_domain_filter": "",
+                            "content_size": "medium",
+                        },
+                        "extraMcpData": [],
+                    }
+                ],
             }
             
             # 構建headers
@@ -374,9 +357,7 @@ class ProxyGUI:
             )
             
             if api_response.status_code == 200:
-                api_response_data = extract_answer_text_from_sse(api_response.text)
-                if not api_response_data:
-                    api_response_data = "未解析到回答內容。請查看 proxy_app.log 或暫時改用完整 SSE 除錯。"
+                api_response_data = api_response.text
                 self.response_text.delete(1.0, tk.END)
                 self.response_text.insert(tk.END, api_response_data[:8000])
                 self.log_message(f"API端點訊息發送成功: {message}")
