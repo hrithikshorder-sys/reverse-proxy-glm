@@ -537,3 +537,100 @@ bigmodel_token_production
 
 若 token 曾貼出，建議重新登入 BigModel，讓舊 token 失效。
 
+## 15. Chatbox Adapter Checkpoint
+
+Date: 2026-05-28
+
+### Problem
+
+Chatbox sends an OpenAI-compatible request body:
+
+```json
+{
+  "model": "glm-5-1",
+  "messages": [
+    {
+      "role": "user",
+      "content": "HI"
+    }
+  ]
+}
+```
+
+BigModel trial SSE does not accept this shape directly. It expects:
+
+```json
+{
+  "model": "glm-5.1",
+  "prompt": [
+    {
+      "role": "user",
+      "content": "HI",
+      "fileContentList": []
+    }
+  ],
+  "modelId": 11989,
+  "stream": true
+}
+```
+
+The root cause was not the URL alone. The proxy was forwarding requests without translating the API contract.
+
+### Design Decision
+
+The local service now behaves as an API Adapter / API Translator:
+
+- If the incoming JSON contains `messages`, it is treated as Chatbox/OpenAI format.
+- The proxy converts `messages` into BigModel `prompt`.
+- The proxy replaces the upstream URL with `/api/biz/trial/response/v4/sse/{model_id}`.
+- The proxy fills required BigModel headers from `auth_config.local.json` or environment variables.
+- If the incoming JSON already contains BigModel `prompt`, it is forwarded as before.
+
+### Header Rules
+
+The adapter fills these headers when missing:
+
+```text
+Authorization
+Bigmodel-Organization
+Bigmodel-Project
+Set-Language: zh
+Accept: text/event-stream
+Content-Type: application/json
+```
+
+Credential priority:
+
+```text
+incoming request headers -> auth_config.local.json -> environment variables
+```
+
+### GUI Change
+
+Added checkbox:
+
+```text
+[ ] 是否使用 CHATBOX
+```
+
+Behavior:
+
+- Unchecked: GUI sends native BigModel `prompt` payload.
+- Checked: GUI sends Chatbox/OpenAI `messages` payload and lets the proxy convert it.
+
+### Checkpoint
+
+Run:
+
+```powershell
+python -m py_compile reverse_proxy_server.py proxy_gui.py main.py
+python main.py
+```
+
+Expected:
+
+- App opens normally.
+- Proxy starts automatically.
+- Default message is `HI`.
+- Unchecked mode sends BigModel `prompt`.
+- Checked Chatbox mode sends `messages`, proxy logs conversion, then BigModel receives `prompt`.

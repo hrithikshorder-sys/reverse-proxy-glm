@@ -144,15 +144,22 @@ class ProxyGUI:
         self.message_entry = ttk.Entry(message_frame, width=50)
         self.message_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5, pady=2)
         self.message_entry.insert(0, "HI")
+
+        self.use_chatbox_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            message_frame,
+            text="是否使用 CHATBOX",
+            variable=self.use_chatbox_var,
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, padx=5, pady=2)
         
         # 發送按鈕
         send_button = ttk.Button(message_frame, text="發送訊息", command=self.send_message)
-        send_button.grid(row=1, column=0, columnspan=2, pady=5)
+        send_button.grid(row=2, column=0, columnspan=2, pady=5)
         
         # 響應顯示
-        ttk.Label(message_frame, text="AI回應:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(message_frame, text="AI回應:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
         self.response_text = scrolledtext.ScrolledText(message_frame, height=6, width=70)
-        self.response_text.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=2)
+        self.response_text.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=2)
 
         # 日誌框架
         log_frame = ttk.LabelFrame(main_frame, text="日誌", padding="5")
@@ -166,7 +173,7 @@ class ProxyGUI:
         main_frame.rowconfigure(8, weight=1)
         auth_frame.columnconfigure(1, weight=1)
         message_frame.columnconfigure(1, weight=1)
-        message_frame.rowconfigure(3, weight=1)
+        message_frame.rowconfigure(4, weight=1)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         
@@ -302,31 +309,41 @@ class ProxyGUI:
                 messagebox.showwarning("缺少認證", "請填入 Organization 和 Project")
                 return
             
-            # 構建前端 SSE API 請求格式
-            api_json_data = {
-                "model": model_code,
-                "prompt": [{"role": "user", "content": message, "fileContentList": []}],
-                "modelId": int(model_id) if model_id.isdigit() else model_id,
-                "stream": True,
-                "thinking": {"type": "enabled"},
-                "max_tokens": 65536,
-                "temperature": 1,
-                "top_p": 0.95,
-                "tools": [
-                    {
-                        "type": "web_search",
-                        "web_search": {
-                            "search_engine": "search_std",
-                            "search_recency_filter": "noLimit",
-                            "count": 10,
-                            "search_intent": False,
-                            "search_domain_filter": "",
-                            "content_size": "medium",
-                        },
-                        "extraMcpData": [],
-                    }
-                ],
-            }
+            use_chatbox = self.use_chatbox_var.get()
+            if use_chatbox:
+                api_json_data = {
+                    "model": model_code.replace(".", "-"),
+                    "messages": [{"role": "user", "content": message}],
+                    "temperature": 1,
+                    "top_p": 0.95,
+                    "max_tokens": 1000,
+                }
+            else:
+                # 構建前端 SSE API 請求格式
+                api_json_data = {
+                    "model": model_code,
+                    "prompt": [{"role": "user", "content": message, "fileContentList": []}],
+                    "modelId": int(model_id) if model_id.isdigit() else model_id,
+                    "stream": True,
+                    "thinking": {"type": "enabled"},
+                    "max_tokens": 65536,
+                    "temperature": 1,
+                    "top_p": 0.95,
+                    "tools": [
+                        {
+                            "type": "web_search",
+                            "web_search": {
+                                "search_engine": "search_std",
+                                "search_recency_filter": "noLimit",
+                                "count": 10,
+                                "search_intent": False,
+                                "search_domain_filter": "",
+                                "content_size": "medium",
+                            },
+                            "extraMcpData": [],
+                        }
+                    ],
+                }
             
             # 構建headers
             headers = {
@@ -346,7 +363,11 @@ class ProxyGUI:
                 headers["Bigmodel-Project"] = project_id
             
             # 發送API請求
-            api_url = f"{proxy_address}/api/biz/trial/response/v4/sse/{model_id}"
+            if use_chatbox:
+                api_url = f"{proxy_address}/api/biz/trial/response/v4/sse/glm-5-1"
+                self.log_message("使用 CHATBOX 模式：送出 OpenAI messages，由 proxy 轉成 BigModel prompt")
+            else:
+                api_url = f"{proxy_address}/api/biz/trial/response/v4/sse/{model_id}"
             self.log_message(f"發送請求到: {api_url}")
             
             api_response = requests.post(

@@ -3,9 +3,12 @@ import requests
 from flask import Flask, request, jsonify, Response
 from urllib.parse import urljoin
 import logging
+import json
 import os
 import sys
 
+
+LOCAL_AUTH_CONFIG = "auth_config.local.json"
 
 SENSITIVE_HEADERS = {
     'authorization',
@@ -13,6 +16,34 @@ SENSITIVE_HEADERS = {
     'set-cookie',
     'x-token',
 }
+
+
+def load_local_auth_config():
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LOCAL_AUTH_CONFIG)
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as config_file:
+            return json.load(config_file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def config_value(config_key, env_key, default=""):
+    config = load_local_auth_config()
+    value = str(config.get(config_key, "")).strip()
+    if value:
+        return value
+    return os.environ.get(env_key, default).strip()
+
+
+def has_header(headers, header_name):
+    return any(name.lower() == header_name.lower() for name in headers)
+
+
+def set_header_if_missing(headers, header_name, value):
+    if value and not has_header(headers, header_name):
+        headers[header_name] = value
 
 
 def sanitize_headers(headers):
@@ -26,17 +57,67 @@ def sanitize_headers(headers):
 
 
 def apply_env_auth_headers(headers):
-    auth = os.environ.get('BIGMODEL_AUTH', '').strip()
-    org_id = os.environ.get('BIGMODEL_ORG', '').strip()
-    project_id = os.environ.get('BIGMODEL_PROJECT', '').strip()
+    auth = config_value('authorization', 'BIGMODEL_AUTH')
+    org_id = config_value('organization', 'BIGMODEL_ORG')
+    project_id = config_value('project', 'BIGMODEL_PROJECT')
 
-    if auth and not headers.get('Authorization'):
-        headers['Authorization'] = auth
-    if org_id and not headers.get('Bigmodel-Organization'):
-        headers['Bigmodel-Organization'] = org_id
-    if project_id and not headers.get('Bigmodel-Project'):
-        headers['Bigmodel-Project'] = project_id
+    set_header_if_missing(headers, 'Authorization', auth)
+    set_header_if_missing(headers, 'Bigmodel-Organization', org_id)
+    set_header_if_missing(headers, 'Bigmodel-Project', project_id)
+    set_header_if_missing(headers, 'Set-Language', 'zh')
+    set_header_if_missing(headers, 'Accept', 'text/event-stream')
+    set_header_if_missing(headers, 'Content-Type', 'application/json')
     return headers
+
+
+def extract_text_content(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+        return "\n".join(part for part in parts if part).strip()
+    if content is None:
+        return ""
+    return str(content)
+
+
+def convert_messages_to_bigmodel(body):
+    model_id = config_value('model_id', 'BIGMODEL_MODEL_ID', '11989')
+    model_code = os.environ.get('BIGMODEL_MODEL_CODE', 'glm-5.1').strip() or 'glm-5.1'
+    requested_model = body.get("model", model_code)
+    if requested_model == "glm-5-1":
+        requested_model = "glm-5.1"
+    prompt = []
+
+    for msg in body.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        prompt.append({
+            "role": msg.get("role", "user"),
+            "content": extract_text_content(msg.get("content", "")),
+            "fileContentList": [],
+        })
+
+    payload = {
+        "model": requested_model,
+        "prompt": prompt,
+        "modelId": int(model_id) if model_id.isdigit() else model_id,
+        "stream": True,
+        "thinking": {"type": "enabled"},
+        "max_tokens": body.get("max_tokens", 65536),
+        "temperature": body.get("temperature", 1),
+        "top_p": body.get("top_p", 0.95),
+    }
+
+    return payload, model_id
 
 class ReverseProxyServer:
     def __init__(self):
@@ -91,9 +172,17 @@ class ReverseProxyServer:
                 if request.method == 'GET':
                     response = requests.get(target_url, headers=headers, params=request.args, data=data, timeout=30)
                 elif request.method == 'POST':
-                    json_data = request.get_json()
+                    json_data = request.get_json(silent=True)
+                    if isinstance(json_data, dict) and "messages" in json_data:
+                        json_data, model_id = convert_messages_to_bigmodel(json_data)
+                        target_url = f"{base_url}/api/biz/trial/response/v4/sse/{model_id}"
+                        data = None
+                        logging.info("Detected Chatbox/OpenAI messages payload; converted to BigModel prompt payload")
                     logging.info(f"POST數據: {json_data}")
-                    response = requests.post(target_url, headers=headers, json=json_data, data=data, timeout=30)
+                    if json_data is not None:
+                        response = requests.post(target_url, headers=headers, json=json_data, timeout=30)
+                    else:
+                        response = requests.post(target_url, headers=headers, data=data, timeout=30)
                 elif request.method == 'PUT':
                     response = requests.put(target_url, headers=headers, json=request.get_json(), data=data, timeout=30)
                 elif request.method == 'DELETE':
