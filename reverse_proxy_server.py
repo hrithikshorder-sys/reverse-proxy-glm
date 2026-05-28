@@ -119,6 +119,69 @@ def convert_messages_to_bigmodel(body):
 
     return payload, model_id
 
+
+def extract_bigmodel_answer_text(payload):
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("text", "content", "answer", "output"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            delta = first.get("delta")
+            if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+                return delta["content"]
+            message = first.get("message")
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+    return ""
+
+
+def openai_stream_chunk(content="", role=None, finish_reason=None):
+    delta = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    chunk = {
+        "id": "chatcmpl-bigmodel-proxy",
+        "object": "chat.completion.chunk",
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def convert_bigmodel_sse_to_openai_sse(content):
+    output = [openai_stream_chunk(role="assistant")]
+    for raw_line in content.decode("utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data_text = line[5:].strip()
+        if not data_text or data_text == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data_text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, list):
+            continue
+        text = extract_bigmodel_answer_text(payload)
+        if text:
+            output.append(openai_stream_chunk(content=text))
+    output.append(openai_stream_chunk(finish_reason="stop"))
+    output.append(b"data: [DONE]\n\n")
+    return b"".join(output)
+
 class ReverseProxyServer:
     def __init__(self):
         self.app = Flask(__name__)
@@ -166,6 +229,7 @@ class ReverseProxyServer:
             headers.pop('Host', None)
             headers.pop('Content-Length', None)
             headers = apply_env_auth_headers(headers)
+            openai_response_mode = False
             
             try:
                 # 根據請求方法轉發
@@ -177,6 +241,7 @@ class ReverseProxyServer:
                         json_data, model_id = convert_messages_to_bigmodel(json_data)
                         target_url = f"{base_url}/api/biz/trial/response/v4/sse/{model_id}"
                         data = None
+                        openai_response_mode = True
                         logging.info("Detected Chatbox/OpenAI messages payload; converted to BigModel prompt payload")
                     logging.info(f"POST數據: {json_data}")
                     if json_data is not None:
@@ -205,7 +270,13 @@ class ReverseProxyServer:
                 # 轉發響應
                 excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
                 headers = [(name, value) for (name, value) in response.headers.items() if name.lower() not in excluded_headers]
-                
+                if openai_response_mode and response.status_code == 200:
+                    converted_content = convert_bigmodel_sse_to_openai_sse(response.content)
+                    headers = [(name, value) for (name, value) in headers if name.lower() != 'content-type']
+                    headers.append(('Content-Type', 'text/event-stream; charset=utf-8'))
+                    logging.info("Converted BigModel SSE response to OpenAI-compatible SSE chunks")
+                    return Response(converted_content, response.status_code, headers)
+
                 return Response(response.content, response.status_code, headers)
                 
             except requests.exceptions.RequestException as e:
